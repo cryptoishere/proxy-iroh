@@ -1,0 +1,10 @@
+/target
+/dist
+*.swp
+*.swo
+
+/scripts/
+
+PACKAGING.md
+RELEASING-MANUAL.md
+RELEASING.md
