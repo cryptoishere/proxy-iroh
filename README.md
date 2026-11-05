@@ -83,6 +83,7 @@ When a client requests a UDP association (e.g., for WebTransport), it sends a V2
 | `SOCKS5_QUOTA_MAX` | No | `256` | Concurrent connections per IP. `0` disables. |
 | `SOCKS5_ALLOWED_PORTS` | No | `22,80,443,8080,8443` | Server-side egress allowlist. See [Port Policy](#port-policy). |
 | `SOCKS5_BLOCK_PRIVATE_IPS` | Auto-On | `on` | Block loopback / RFC 1918 / link-local / CGNAT / IPv6 ULA destinations. See [IP Policy](#ip-policy). |
+| `RELAY_IDLE_SECS` | No | `60` | Seconds a half-closed relay may sit idle before being torn down. See [Relay lifecycle](#relay-lifecycle). |
 | `HOST_IP_CHECKERS_LIST` | No | defaults | Comma-separated HTTPS URLs to verify server public IP. |
 
 **Listen Address:** The server binds to `0.0.0.0:1082` by default.
@@ -112,6 +113,17 @@ Appends `CiGPeerApp/db` to the following base directory:
 - If `XDG_DATA_HOME` is set, its value is used.
 - Otherwise, the server uses `$HOME/.local/share`.
 Example: `/home/alice/.local/share/CiGPeerApp/db`
+
+## Relay lifecycle
+
+Each accepted SOCKS5 or V2 session becomes a `Relay` — a mio-driven pair of sockets (one to the client over iroh, one to the destination over TCP) plus two buffers. A relay is torn down when **either** of these conditions is met:
+
+1. **Both halves closed cleanly.** The client FINed, the destination FINed, and all buffered data has been flushed.
+2. **One half closed and the other went silent.** The client FINed but the destination never FINed back (common with long-lived HTTPS keep-alive servers), or vice versa. The relay is closed after `RELAY_IDLE_SECS` seconds of inactivity on either side.
+
+Without (2), a destination that keeps a connection open without sending FIN would hold two file descriptors (one for the client socketpair, one for the destination TCP socket) until the process exited. On a busy server that accumulates dozens of such destinations per hour, the process hits its `ulimit -n` and starts failing new `socketpair()` / `create_bridge_pair()` calls with `EMFILE`.
+
+Set `RELAY_IDLE_SECS` higher than the longest interval your clients spend in a half-closed state — 60 s covers any normal HTTPS exchange. Servers that see long-polling APIs with multi-minute gaps between last-byte-in and FIN may want `RELAY_IDLE_SECS=300`.
 
 ## Port Policy
 
@@ -152,9 +164,14 @@ Set `SOCKS5_BLOCK_PRIVATE_IPS=off` only if the server is intentionally deployed 
 
 ### Interaction with DNS
 
-The check runs **after** resolution.
+The check runs **after** resolution, so it catches:
 
-It does **not** catch an HTTP redirect from a public host to an internal one. That would require parsing and rewriting HTTP inside the SOCKS5 stream, which is out of scope for a transparent SOCKS5 proxy.
+- A client requesting `http://localhost:443` directly (resolves to `127.0.0.1`)
+- A client requesting `http://10.0.0.1:443` directly (already an IP)
+- A client requesting `http://internal.corp.example:443` that resolves to an RFC 1918 address
+- A client requesting `http://metadata.google.internal:80` that resolves to `169.254.169.254`
+
+It does **not** catch an HTTP redirect from a public host to an internal one. That would require parsing and rewriting HTTP inside the SOCKS5 stream, which is out of scope for a transparent SOCKS5 proxy. If you need that level of protection, restrict allowed ports further (e.g., `443` only, no `80`) so redirects cannot downgrade to plaintext.
 
 ## Security Model
 

@@ -2,13 +2,13 @@
 
 The official client and TUN/VPN bridge for the `proxy-iroh` ecosystem. 
 
-The client provides a local SOCKS5 endpoint (`127.0.0.1:1080` or `127.0.0.1:18080`) that applications can connect to, and transparently routes the traffic through an encrypted Iroh QUIC session to the remote `proxy-iroh` server. It also includes a system-wide TUN mode to capture all host traffic without requiring application-level proxy configuration.
+The client provides a local SOCKS5 endpoint (`127.0.0.1:18080`) that applications can connect to, and transparently routes the traffic through an encrypted Iroh QUIC session to the remote `proxy-iroh` server. It also includes a system-wide TUN mode to capture all host traffic without requiring application-level proxy configuration.
 
 *Note: This document covers the Client implementation. For the Server implementation, please see [README.md](README.md).*
 
 ## Features
 
-- **Local SOCKS5 Proxy** — exposes a standard SOCKS5 interface (default `127.0.0.1:1080` or `18080`).
+- **Local SOCKS5 Proxy** — exposes a standard SOCKS5 interface on `127.0.0.1:18080`.
 - **System-wide VPN (TUN) Mode** — uses a userspace `tun2socks` bridge to intercept all system traffic.
 - **HTTP CONNECT Translation** — automatically translates HTTP `CONNECT` requests into SOCKS5 for compatibility with browser proxy settings.
 - **V2 CONNECT-UDP & Fragmentation** — tunnels WebTransport, HTTP/3, and raw UDP by fragmenting packets at 900 bytes to bypass Iroh's MTU limits.
@@ -79,7 +79,7 @@ RELAY_URL_PUBLIC="https://relay.example.com" \
 
 Once running, configure your browser or use `curl`:
 ```bash
-curl -v --proxy socks5h://127.0.0.1:1080 https://smartholdem.io
+curl -v --proxy socks5h://127.0.0.1:18080 https://smartholdem.io
 ```
 
 ---
@@ -121,8 +121,8 @@ To prevent a routing loop (where the encrypted Iroh traffic routes back into the
 **Fix:** This is not a client bug. Contact the server operator to adjust `SOCKS5_ALLOWED_PORTS` or `SOCKS5_BLOCK_PRIVATE_IPS` on the server. On the client side, verify the destination is actually public and on a permitted port:
 
 ```bash
-curl -v --proxy socks5h://127.0.0.1:1080 https://example.com:443    # expected: works
-curl -v --proxy socks5h://127.0.0.1:1080 http://example.com:25      # expected: REP 0x02
+curl -v --proxy socks5h://127.0.0.1:18080 https://example.com:443    # expected: works
+curl -v --proxy socks5h://127.0.0.1:18080 http://example.com:25      # expected: REP 0x02
 ```
 
 If the port is in the default allowlist but you still see refusals, check whether the destination resolves to a private IP:
@@ -153,6 +153,7 @@ If you are building a custom client, it must satisfy the following to communicat
 2. **Handshake:** Implement the ChaCha20-Poly1305 `Hello`/`Welcome` handshake using the shared `ProxySecret`.
 3. **V2 Datagram Support:** Implement the `S5T2` framing (refer to the Server `README.md` for the fragment header layout) to support UDP and WebTransport.
 4. **MTU:** Ensure local TUN devices are configured with an MTU of at least 1500 to prevent silent packet drops.
+5. **Policy handling:** Treat SOCKS5 `REP = 0x02` (or the V2 equivalent) as a deterministic refusal. Do not retry with backoff — the server will refuse every attempt. Surface the error to the user, or in TUN mode let the destination TCP/UDP flow fail naturally so the application-level retry logic handles it.
 
 ## License
 See repository's `LICENSE` file.
