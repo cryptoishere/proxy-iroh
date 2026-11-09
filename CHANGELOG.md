@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-09
+
+### Added
+
+- **HMAC-derived key separation.** Introduced separate derived keys for HTTP authentication, tunnel authentication, and tunnel encryption, preventing the same shared secret from being reused directly across different cryptographic purposes.
+- **Signature type identifiers.** Added internal signature type identifiers for system (`0x00`) and client (`0x01`) signatures.
+- **Port `853` in the default `SOCKS5_ALLOWED_PORTS`.** Allows DNS-over-TLS through the tunnel. Without it, hosts configured for DoT — the common case on Linux with `systemd-resolved` — cannot resolve any names while the VPN is up: the DoT dial to `1.1.1.1:853` is captured by the client's tunnel, refused by the server's port policy, and there is no plaintext fallback. The server returns `REP = 0x02` and every `getaddrinfo` on the host fails with `SERVFAIL`.
+
+### Changed
+
+- **Signed RFC 1929 credentials.** Updated credential parsing and serialization to include the signature type identifier.
+- **Server default `SOCKS5_ALLOWED_PORTS`** extended from `22,80,443,8080,8443` to `22,80,443,8080,8443,853`.
+
+### Fixed
+
+- **Tunnel Hello address-length validation.** Added client-side validation to reject empty addresses and addresses exceeding the protocol's 255-byte limit before encoding the length into a single byte. This prevents silent `u8` truncation and malformed handshake messages.
+- **DNS resolution failed silently with no diagnostic when the server did not allow `853`.** The port refusal now surfaces in the server log as `V2 CONNECT blocked: ...:853 (port not in allowlist)`, and the client-visible symptom (`dig` timeouts against `127.0.0.53`, browser `ERR_NAME_NOT_RESOLVED`) is documented under *DNS Resolution Fails in VPN Mode* in `CLIENT.md`.
+
 ## [0.5.1] - 2026-11-05
 
 ### Fixed
@@ -47,7 +65,7 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Datagram fragmentation and reassembly.** Robust reassembly engine chunking at 900 bytes, bypassing Iroh's ~1150-byte datagram limit and preventing silent drops of 1250-byte QUIC Initial packets.
 - **Cross-platform bridge.** Unified `lib/bridge.rs` supporting both Unix (`AF_UNIX` socket pairs) and Windows (loopback TCP/UDP pairs) for stream and datagram forwarding.
 - **HTTP CONNECT translation.** The client translates HTTP/1.1 `CONNECT` requests into SOCKS5, improving compatibility with browser proxy settings.
-- **Server port allowlist** (`SOCKS5_ALLOWED_PORTS`, default `22,80,443,8080,8443`). Default-deny egress on V1 CONNECT, V2 CONNECT, and V2 CONNECT-UDP. Supports ranges (`1-1024`), `*`, and empty string. Fails closed on parse error. Blocked destinations get SOCKS5 `REP = 0x02`. Blocks SMTP/IMAP/POP3/FTP/Telnet/RDP/VNC/SMB/LDAP and every database port (MySQL, PostgreSQL, MSSQL, Redis, Memcached, MongoDB, Elasticsearch) by default.
+- **Server port allowlist** (`SOCKS5_ALLOWED_PORTS`, default `22,80,443,8080,8443,853`). Default-deny egress on V1 CONNECT, V2 CONNECT, and V2 CONNECT-UDP. Supports ranges (`1-1024`), `*`, and empty string. Fails closed on parse error. Blocked destinations get SOCKS5 `REP = 0x02`. Blocks SMTP/IMAP/POP3/FTP/Telnet/RDP/VNC/SMB/LDAP and every database port (MySQL, PostgreSQL, MSSQL, Redis, Memcached, MongoDB, Elasticsearch) by default.
 - **Server SSRF guard** (`SOCKS5_BLOCK_PRIVATE_IPS`, default `on`). After DNS resolution, refuses loopback, RFC 1918, link-local, CGNAT, IPv6 ULA, and unspecified destinations — including cloud metadata (`169.254.169.254`).
 - **Server backpressure queues** (`pending_bridge_frames`, `pending_dest_frames`). Bounded FIFO queues (1 MiB cap) drained every `POLL_TIMEOUT` so kernel-buffer pressure does not drop fragments mid-WebTransport handshake.
 - **Client backpressure queue** (`pending_iroh_fragments`). Fragments that hit `SendDatagramFull` are queued with their siblings (so reassembly stays coherent) and retried on the next tick / next Remote event.
@@ -59,6 +77,7 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.0...v0.5.2
 [0.5.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cryptoishere/proxy-iroh/releases/tag/v0.5.0

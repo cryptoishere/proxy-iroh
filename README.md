@@ -81,7 +81,7 @@ When a client requests a UDP association (e.g., for WebTransport), it sends a V2
 | `SOCKS5_RATE_MAX` | No | `1200` | Per-IP connection attempts per window. `0` disables. |
 | `SOCKS5_RATE_WINDOW_SECS` | No | `60` | Rate-limit window. |
 | `SOCKS5_QUOTA_MAX` | No | `256` | Concurrent connections per IP. `0` disables. |
-| `SOCKS5_ALLOWED_PORTS` | No | `22,80,443,8080,8443` | Server-side egress allowlist. See [Port Policy](#port-policy). |
+| `SOCKS5_ALLOWED_PORTS` | No | `22,80,443,8080,8443,853` | Server-side egress allowlist. See [Port Policy](#port-policy). |
 | `SOCKS5_BLOCK_PRIVATE_IPS` | Auto-On | `on` | Block loopback / RFC 1918 / link-local / CGNAT / IPv6 ULA destinations. See [IP Policy](#ip-policy). |
 | `RELAY_IDLE_SECS` | No | `60` | Seconds a half-closed relay may sit idle before being torn down. See [Relay lifecycle](#relay-lifecycle). |
 | `HOST_IP_CHECKERS_LIST` | No | defaults | Comma-separated HTTPS URLs to verify server public IP. |
@@ -95,7 +95,7 @@ SOCKS5_SIGNATURE_AUTH=true \
 SOCKS5_TUNNEL_ENCRYPTION=on \
 SOCKS5_RATE_MAX=1200 \
 SOCKS5_QUOTA_MAX=256 \
-SOCKS5_ALLOWED_PORTS=22,80,443,8080,8443 \
+SOCKS5_ALLOWED_PORTS=22,80,443,8080,8443,853 \
 SOCKS5_BLOCK_PRIVATE_IPS=on \
 ./server
 ```
@@ -134,12 +134,21 @@ The server enforces a **default-deny allowlist** on outbound TCP and UDP. Every 
 `SOCKS5_ALLOWED_PORTS` accepts a comma-separated list of individual ports and `lo-hi` ranges:
 
 ```bash
-SOCKS5_ALLOWED_PORTS=22,80,443,8080,8443        # individual ports
+SOCKS5_ALLOWED_PORTS=22,80,443,8080,8443,853        # individual ports
 SOCKS5_ALLOWED_PORTS=1-1024,8080,8443           # ranges
 SOCKS5_ALLOWED_PORTS=443                        # HTTPS only
 SOCKS5_ALLOWED_PORTS=*                          # allow everything
 SOCKS5_ALLOWED_PORTS=                           # deny everything
 ```
+### Why `853` is in the default
+
+Port `853` is DNS-over-TLS. Including it in the default allowlist lets clients whose host resolver is configured for DoT — the common case on Linux systems using `systemd-resolved` — resolve names while the tunnel is up.
+
+Without it, every DNS query on such a host fails. The resolver dials `1.1.1.1:853`, the dial is captured by the client's tunnel, and the server refuses it with `REP = 0x02`. There is no plaintext DNS fallback configured on most modern Linux hosts, so name resolution breaks entirely while the VPN is up, and every application that performs a lookup reports `SERVFAIL`. This was the default behaviour before 0.5.2 and produced an unrecoverable deadlock for affected hosts.
+
+Clients that terminate DNS inside the server (via a dedicated handler on `10.0.0.1:53`) would not need `853` exposed. That handler does not exist yet. Until it does, `853` in the default is the pragmatic choice.
+
+If you want to restrict `853` to a specific DoT provider (e.g. Cloudflare only), the current `PortPolicy` does not support per-destination port rules. The two options are: accept the broader exposure (any authenticated client can reach any DoT server on `:853`), or extend `lib::support::net::port_policy` with a `(port, ip_prefix)` allowlist. Neither is necessary for correctness — the DoT content itself is encrypted end-to-end to the destination provider, so the tunnel sees only opaque TLS bytes.
 
 ## IP Policy
 
