@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-10
+
+### Changed (Breaking)
+
+- **Tunnel Hello wire format.** The plaintext `Hello` message now carries a **signature type** byte (`0x00` = SYSTEM, `0x01` = CLIENT) immediately after the magic and before the address-length field. The value is covered by the HMAC, so the client's claimed identity is cryptographically bound to possession of the matching account's secret.
+- **`MAGIC_HELLO` bumped** from `S5-TUNNEL-v1\x00\x00\x00\x00` to `S5-TUNNEL-v2\x00\x00\x00\x00`. Peers running different versions now fail the handshake with `bad magic` instead of misparsing the byte stream.
+
+This is a **wire-incompatible change**. Server and client must be upgraded together. A 0.5.x client cannot connect to a 0.6.0 server, and a 0.6.0 client cannot connect to a 0.5.x server. The failure is immediate and explicit (`bad magic`), not silent data corruption.
+
 ## [0.5.2] - 2026-11-09
 
 ### Added
@@ -77,7 +86,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...HEAD
-[0.5.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.0...v0.5.2
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cryptoishere/proxy-iroh/releases/tag/v0.5.0
