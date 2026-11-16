@@ -16,6 +16,7 @@ An authenticated, high-performance SOCKS5 and UDP proxy server powered by Iroh, 
 - **P2P & Relay Fallback** — attempts direct NAT traversal with the client when possible, falling back to an Iroh relay only when necessary.
 - **Server-Side Port Allowlist** — default-deny egress on the server. Only the ports named in `SOCKS5_ALLOWED_PORTS` may be reached; SMTP, IMAP, POP3, RDP, MySQL, PostgreSQL, Redis, MongoDB, Elasticsearch, VNC, SMB, LDAP, and everything else are blocked by default.
 - **Server-Side IP Policy (SSRF guard)** — blocks loopback, RFC 1918, link-local, CGNAT, IPv6 ULA, and IPv6 link-local destinations after DNS resolution, protecting internal infrastructure and cloud metadata endpoints from being reached via the tunnel.
+- **On-Chain Client Verification** — when a client presents `sig_type = CLIENT_TYPE`, the server queries the central hub before completing the tunnel handshake. Addresses not registered on chain, or explicitly revoked, are rejected before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
 - **Cross-Platform** — native support for both Linux and Windows. The server uses a unified `lib/bridge.rs` to abstract `AF_UNIX` socket pairs (Linux) and loopback pairs (Windows).
 - **Configurable IP Checkers** — the public IP checker pool can be supplied via `HOST_IP_CHECKERS_LIST` to monitor the server's outbound IP.
 
@@ -32,13 +33,20 @@ An authenticated, high-performance SOCKS5 and UDP proxy server powered by Iroh, 
         +---- Iroh relay fallback
                      |
                      v
-             [proxy-iroh Server]
+             [proxy-iroh Server]  ◄──────────────►  [Central Hub]
+                     |                            on-chain registry
+                     |                            (ALPN proxy/srv/0)
+                     +---- Tunnel Hello HMAC verify
                      |
+                     +---- CLIENT_TYPE: on-chain check ──┐
+                     |                                    │
+                     |       SYSTEM_TYPE: skip ───────────┤
+                     |                                    ▼
                      +---- Parses SOCKS5 (TCP) or V2 (UDP)
                      |
                      +---- Port policy check (SOCKS5_ALLOWED_PORTS)
                      |     ↓
-                     +---- DNS resolution (Dot)
+                     +---- DNS resolution (DoT)
                      |     ↓
                      +---- IP policy check (RFC1918 / loopback / …)
                      |
@@ -85,6 +93,11 @@ When a client requests a UDP association (e.g., for WebTransport), it sends a V2
 | `SOCKS5_BLOCK_PRIVATE_IPS` | Auto-On | `on` | Block loopback / RFC 1918 / link-local / CGNAT / IPv6 ULA destinations. See [IP Policy](#ip-policy). |
 | `RELAY_IDLE_SECS` | No | `60` | Seconds a half-closed relay may sit idle before being torn down. See [Relay lifecycle](#relay-lifecycle). |
 | `HOST_IP_CHECKERS_LIST` | No | defaults | Comma-separated HTTPS URLs to verify server public IP. |
+| `CONN_HARD_IDLE_SECS` | No | `300` | Per-Connection watchdog: force-closes a Connection after N seconds without application traffic, regardless of transport-layer state. |
+| `CENTRAL_ENDPOINT_SNI` | Conditional | `crypto-ig.com` | Hub hostname. Required when `SOCKS5_SIGNATURE_AUTH=true`. |
+| `CENTRAL_ENDPOINT_SNI_PORT` | Conditional | `443` (release) / `9002` (debug) | Hub port. Required when `SOCKS5_SIGNATURE_AUTH=true`. |
+| `TARGET_ENDPOINT_X1_CENTRAL_HUB_13` | Conditional | cfe9d0de0e7c81e3c183dd3aec1927503e80f9b3509793a20ec220ae182f30d3 | Hub Iroh `EndpointId`. Required when `SOCKS5_SIGNATURE_AUTH=true`. |
+| `ENDPOINT_BIND_ADDRESS_CENTRAL_HUB` | No | `0.0.0.0:44445` | Bind address for the hub-facing Iroh endpoint. |
 
 **Listen Address:** The server binds to `0.0.0.0:1082` by default.
 
@@ -113,6 +126,72 @@ Appends `CiGPeerApp/db` to the following base directory:
 - If `XDG_DATA_HOME` is set, its value is used.
 - Otherwise, the server uses `$HOME/.local/share`.
 Example: `/home/alice/.local/share/CiGPeerApp/db`
+
+## Central Hub Integration
+
+The central hub maintains the on-chain registry used for client address verification. The server connects to it on a dedicated Iroh endpoint that is separate from the client-facing listener.
+
+### Two endpoints
+
+| Endpoint | Bind address | ALPN | Purpose |
+|---|---|---|---|
+| Client-facing | `ENDPOINT_BIND_ADDRESS` (default `0.0.0.0:44444`) | `socks5/1` | Accepts incoming SOCKS5/tunnel connections |
+| Hub-facing | `ENDPOINT_BIND_ADDRESS_CENTRAL_HUB` (default `0.0.0.0:44445`) | `proxy/srv/0` | Connects to the hub for registration and on-chain verification |
+
+Both endpoints use the same relay (`RELAY_URL_PUBLIC`) and the same pkarr publisher, but independent secret keys (`endpoint_key` and `central_endpoint_key` respectively) so a compromise of one does not expose the other.
+
+### Startup sequence
+
+1. Hub-facing endpoint binds and derives its `EndpointId`.
+2. Server connects to the hub at `TARGET_ENDPOINT_X1_CENTRAL_HUB_13` via the relay.
+3. If `SOCKS5_SIGNATURE_AUTH=true`, `PeerSetup::enable` performs initial registration (first run) or login (subsequent runs) with the hub, persisting the resulting account — including its derived keys — in the local account store.
+4. Client-facing endpoint binds and prints its `EndpointId` (`iroh endpoint id = ...`).
+5. The main loop begins accepting client connections.
+
+The hub connection is **long-lived**. It stays open for the lifetime of the server process, and the server reconnects it lazily whenever an on-chain verification fails with a transport error. A hub restart does not require a server restart.
+
+### Failure behaviour
+
+| Failure | Effect |
+|---|---|
+| Hub unreachable at startup | Server logs `starting tunnel with Central Hub failed` and continues. Client connections will succeed for `SYSTEM_TYPE`, fail for `CLIENT_TYPE`, until the hub becomes reachable. |
+| Hub unreachable per-verification | The individual `CLIENT_TYPE` handshake closes before `Welcome`. The next attempt re-tries the hub connection. |
+| Hub returns `client_address_on_chain: false` | Connection closed before `Welcome`. |
+| Hub response malformed or exceeds 1 MiB | Connection closed before `Welcome`. |
+| Hub does not answer within 30 s | Connection closed before `Welcome`. |
+
+All on-chain failures are **fail-closed** by design. There is no "trust the client when the hub is down" path.
+
+To avoid the startup window entirely, ensure the hub is reachable before starting the server, and monitor for the `starting tunnel with Central Hub failed` line in production.
+
+## On-Chain Client Verification
+
+When a client presents `sig_type = CLIENT_TYPE` under `SOCKS5_SIGNATURE_AUTH=true`, the server verifies the client's wallet address against the hub's on-chain registry **before** sending the `Welcome`. `SYSTEM_TYPE` handshakes are unaffected by this check.
+
+### Handshake flow
+
+1. Client sends `Hello` with `sig_type = CLIENT_TYPE` and its wallet address.
+2. Server derives `derive_client(M, address)` from the master secret `M` and verifies the Hello HMAC. At this point the client has cryptographically proven it holds `derive_client(M, address)` — no other party could have produced the tag.
+3. Server opens a bidirectional stream to the hub and sends `ProxyFrameMetadata { server_address, client_address }` as a length-prefixed postcard frame.
+4. Hub answers `ProxyCallerResponse { client_address_on_chain: bool }` in the same framing.
+5. `client_address_on_chain: true` → `Welcome` is sent, tunnel proceeds.
+6. Any other outcome → connection is closed before the `Welcome`.
+
+Result caching: a successful or negative verification is cached per-address for 60 s to avoid re-querying the hub on every new `Connection` from the same client during a browsing session. Errors are **not** cached.
+
+### What verification provides
+
+| Property | Without on-chain | With on-chain |
+|---|---|---|
+| Revocation without rotating `M` | ✗ | ✓ |
+| Blast radius of `M` compromise | any address an attacker chooses | bounded to addresses currently on chain |
+| Per-address audit trail | ✗ | ✓ |
+
+### What verification does not provide
+
+- **Server-to-client unforgeability.** The server holds the master secret `M` and can derive any client's keys. It can forge a Hello for any on-chain address without the hub being able to distinguish a real client from an impersonating server. This is acceptable for a proxy where the server already sees all plaintext, but it means the server cannot provide third-party proof that a session originated from a client rather than from itself.
+- **Replay protection beyond the 60 s timestamp window.** A captured Hello remains valid for 60 seconds from its embedded timestamp. The on-chain check does not consume the nonce, so a captured Hello that passes the timestamp check will also pass the on-chain check if the address is still registered.
+- **Independence from hub compromise.** The hub also holds `M`, so a compromised hub can answer `true` for any address and can itself forge valid Hellos.
 
 ## Relay lifecycle
 
@@ -184,20 +263,64 @@ It does **not** catch an HTTP redirect from a public host to an internal one. Th
 
 ## Security Model
 
-### Transport & Authentication
-Every connection must begin with the tunnel `Hello`. The server verifies the HMAC signature using the account's `ProxySecret`. If the first byte is not the tunnel magic, the socket is closed immediately. The SOCKS5 conversation is encrypted via ChaCha20-Poly1305.
+### Authentication modes
 
-### Strict Mode (Default)
-When `SOCKS5_SIGNATURE_AUTH=true`:
-- The server refuses to start if the account is missing from the database.
-- Plaintext SOCKS5 greetings (e.g., `05 01 00`) are rejected instantly with no response.
-- RFC 1929 auth is bypassed (identity is proven by the tunnel HMAC).
+The server accepts five modes, selected by `SOCKS5_TUNNEL_ENCRYPTION`, `SOCKS5_SIGNATURE_AUTH`, and the client's claimed `sig_type`. Refer to `SERVER.mods.md` for the full matrix, trust assumptions, and per-mode threat coverage.
+
+| Mode | Encryption | Per-client identity | Revocation |
+|---|---|---|---|
+| Plaintext NO-AUTH | ✗ | ✗ | ✗ |
+| Plaintext RFC 1929 | ✗ | password only | change password |
+| Tunnel HMAC, SYSTEM | ✓ | ✗ | ✗ |
+| Tunnel HMAC, CLIENT | ✓ | ✓ | ✗ |
+| Tunnel HMAC, CLIENT + on-chain | ✓ | ✓ | ✓ |
+
+Internet-facing deployments should run at minimum **Tunnel HMAC, SYSTEM**. Deployments requiring per-client identity should run **Tunnel HMAC, CLIENT**; deployments requiring revocation should run **Tunnel HMAC, CLIENT + on-chain**.
+
+### Transport and authentication
+
+Every connection must begin with the tunnel `Hello`. The server verifies the HMAC against a key derived from the master secret `M`:
+
+- `SYSTEM_TYPE` (0x00): `derive_system(M)` — one shared key for all SYSTEM clients.
+- `CLIENT_TYPE` (0x01): `derive_client(M, address)` — one key per client wallet address, computed from `M` and the address claimed in the Hello.
+
+A mismatch closes the socket immediately. On success the `Welcome` is queued and all subsequent SOCKS5 framing is wrapped in ChaCha20-Poly1305.
+
+### Startup validation
+
+The server refuses to start with configurations that cannot serve a working client:
+
+| Tunnel | Signature | Result |
+|---|---|---|
+| `false` | `false` | Allowed — Mode 1 or Mode 2 |
+| `false` | `true` | **Refused** — plaintext signature transport would expose credentials |
+| `true` | `false` | **Refused** — tunnel Hello cannot be verified without a signature configuration |
+| `true` | `true` | Allowed — Mode 3, 4, or 5 |
+
+The `true` / `false` combination is refused because the tunnel handshake's Hello verification requires `signature_config` to be `Some`. Without it the tunnel path closes every connection, and the only operational path would be the plaintext fallback — a silent contradiction of the operator's intent in setting the tunnel flag.
+
+### On-chain client verification
+
+Under `SOCKS5_SIGNATURE_AUTH=true`, a `CLIENT_TYPE` handshake is not completed until the central hub confirms the client's wallet address is on chain and not revoked. The check runs after HMAC verification and before `Welcome` is queued. Every failure mode — hub unreachable, timeout, malformed response, or a negative result — closes the connection before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
+
+See [On-Chain Client Verification](#on-chain-client-verification) for the full handshake and failure semantics.
+
+### Trust model
+
+The server and the hub both hold the master secret `M`. Both can derive `derive_client(M, addr)` for any address. This produces two properties that must be understood before choosing a mode:
+
+- **Client-to-client impersonation is impossible.** Client B cannot produce a valid Hello for address A because B does not hold `derive_client(M, A)`. The HMAC in the Hello binds the claimed address to possession of the corresponding derivation.
+- **Server-to-client impersonation is possible.** The server holds `M` and can derive any client's keys, so it can forge a valid Hello for any address. The on-chain check bounds which addresses can be targeted — only those currently registered — but does not prevent the server from impersonating a registered client to itself. This is acceptable for a proxy where the server already sees all plaintext; it means the server cannot provide third-party proof that a session originated from a client rather than from itself.
+
+For deployments where third-party auditability matters, the derivation scheme would need to be replaced with wallet-private-key signatures over the Hello, which is a wire-format change and not on the current roadmap.
 
 ### Privacy
-Transport encryption protects data in transit. The remote server inherently sees the decrypted destination requests. End-to-end payload confidentiality (like HTTPS) must be handled by the application layer.
+
+Transport encryption protects data in transit. The server inherently sees the decrypted destination requests. End-to-end payload confidentiality (e.g., HTTPS) must be handled by the application layer.
 
 ### Out of scope
-DNS exfiltration (a client resolving arbitrary hostnames through the server's DoT resolver to leak data) is **not** mitigated by the port or IP policies. It is intended to be handled separately in `lib::dns` (see the roadmap in that module).
+
+DNS exfiltration — a client resolving arbitrary hostnames through the server's DoT resolver to leak data — is **not** mitigated by the port or IP policies. It is intended to be handled separately in `lib::dns` (see the roadmap in that module).
 
 ---
 
@@ -206,9 +329,15 @@ DNS exfiltration (a client resolving arbitrary hostnames through the server's Do
 To communicate with this server, a client must implement the following:
 
 1. **Iroh Transport:** Connect using the ALPN `socks5/1`.
-2. **Tunnel Handshake:** Implement the ChaCha20-Poly1305 `Hello`/`Welcome` handshake using the shared `ProxySecret`.
-3. **V2 Datagram Fragmentation:** If the client intends to proxy UDP (e.g., WebTransport), it must implement the `S5T2` framing and the datagram fragmentation logic (as documented above) to handle packets larger than ~1150 bytes.
-4. **TUN/VPN Mode (Optional):** The client can act as a system-wide VPN by bridging a TUN interface (MTU 1500) to the local SOCKS5 listener.
+2. **Tunnel Handshake:** Implement the ChaCha20-Poly1305 `Hello`/`Welcome` handshake. The `Hello` carries a signature type byte (`0x00` = SYSTEM, `0x01` = CLIENT) inside the HMAC, so a client cannot change its claimed type without invalidating the HMAC.
+3. **SYSTEM_TYPE clients** must hold `derive_system(M)`. On success the `Welcome` is sent immediately; no hub interaction is involved.
+4. **CLIENT_TYPE clients** must:
+   - Hold `derive_client(M, address)` for the wallet address they claim in the Hello, and
+   - Be registered on chain with the central hub, and not revoked.
+   
+   If either condition fails, the server closes the connection before sending `Welcome`. There is no path to complete the handshake without both.
+5. **V2 Datagram Fragmentation:** If the client intends to proxy UDP (e.g., WebTransport), it must implement the `S5T2` framing and the datagram fragmentation logic (as documented above) to handle packets larger than ~1150 bytes.
+6. **TUN/VPN Mode (Optional):** The client can act as a system-wide VPN by bridging a TUN interface (MTU 1500) to the local SOCKS5 listener.
 
 *For detailed setup and configuration of the official client binaries, please refer to [CLIENT.md](CLIENT.md).*
 

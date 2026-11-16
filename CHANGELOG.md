@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-16
+
+### Added
+
+- **On-chain client address verification.** When `SOCKS5_SIGNATURE_AUTH=true` and a client presents `sig_type = CLIENT_TYPE`, the server queries the central hub to confirm the client's wallet address is registered on chain and not revoked before sending the `Welcome`. Only a positive response (`client_address_on_chain: true`) allows the tunnel to proceed. Every other outcome — hub unreachable, malformed response, timeout, or a negative result — closes the connection **before** any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check entirely and behave exactly as in 0.6.0.
+- **Central Hub transport integration.** The server maintains a live Iroh connection to the central hub on ALPN `proxy/srv/0` for on-chain verification queries, alongside the client-facing endpoint on ALPN `socks5/1`. The hub connection is lazily re-established on demand, so a hub restart does not require a server restart.
+- **`CENTRAL_ENDPOINT_SNI` / `CENTRAL_ENDPOINT_SNI_PORT`** — hub hostname and port used for initial registration and verification queries.
+- **`TARGET_ENDPOINT_X1_CENTRAL_HUB_13`** — the central hub's Iroh `EndpointId`.
+- **`ENDPOINT_BIND_ADDRESS_CENTRAL_HUB`** (default `0.0.0.0:44445`) — bind address for the hub-facing Iroh endpoint.
+- **`CONN_HARD_IDLE_SECS`** (default `300`) surfaced in the README configuration table.
+
+### Changed
+
+- **Startup validation.** The server refuses to start with `SOCKS5_TUNNEL_ENCRYPTION=true` and `SOCKS5_SIGNATURE_AUTH=false`. That combination cannot serve a working tunnel client — the Hello cannot be verified because `signature_config` is `None` — and would silently fall back to the plaintext SOCKS5 path, contradicting the operator's intent in setting the tunnel flag. The mirror check (`signature=true`, `tunnel=false`) already existed and is unchanged.
+- **`SECURITY MODEL` section rewritten** to describe the five accepted authentication modes (2 plaintext, 3 tunnel) and the trust model that underlies the HMAC modes.
+- **`Client Support & Requirements`** updated: `CLIENT_TYPE` clients must be provisioned with `derive_client(M, address)` **and** be registered on chain with the central hub. The server will not accept their `Welcome` otherwise.
+- **`Relay` cipher state is now optional.** `Encryptor` and `Decryptor` are wrapped in `Option`, matching the reality that in plaintext modes there is no tunnel to encrypt or decrypt. The relay behaves as a transparent byte pipe when both are `None`, and as a framed relay when both are `Some`. The invariant "tunnel enabled implies cipher present" is enforced by the startup check and the `TunnelWelcome` transition that installs the cipher before `Responding` is reachable, not by a runtime assert.
+
+### Fixed
+
+- **Server started successfully with a stale hub connection.** `init_connection_state` failures were logged but did not prevent the server from accepting `CLIENT_TYPE` handshakes that would later fail at the on-chain step with a generic I/O error. The server now logs the hub failure explicitly at startup (`starting tunnel with Central Hub failed`) and every subsequent on-chain check fails closed with a named cause in the per-connection log.
+- **Plaintext authentication modes panicked at the relay transition.** Modes 1 and 2 (`SOCKS5_TUNNEL_ENCRYPTION=false`) reached `finish_into_relay` with `encryptor` and `decryptor` both `None`, where `encryptor.expect("tunnel must be active in relay")` terminated the process with `PANIC!`. The panic was correct for its original assumption — that the relay transition only occurs on the tunnel path — but that assumption has been false since plaintext modes were added at the handshake level. With the `Relay` change above, plaintext handshakes now complete their relay with pass-through semantics: bytes read from the client are forwarded to the remote unchanged, and bytes read from the remote are forwarded to the client unchanged. Tunnel modes are unaffected because `encryptor`/`decryptor` are still `Some` on that path, verified by the startup check and by `pending_switch` installation in the `TunnelWelcome` transition.
+
 ## [0.6.0] - 2026-11-10
 
 ### Changed (Breaking)
@@ -86,7 +109,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.0...v0.5.1
