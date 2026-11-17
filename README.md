@@ -19,6 +19,7 @@ An authenticated, high-performance SOCKS5 and UDP proxy server powered by Iroh, 
 - **On-Chain Client Verification** — when a client presents `sig_type = CLIENT_TYPE`, the server queries the central hub before completing the tunnel handshake. Addresses not registered on chain, or explicitly revoked, are rejected before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
 - **Cross-Platform** — native support for both Linux and Windows. The server uses a unified `lib/bridge.rs` to abstract `AF_UNIX` socket pairs (Linux) and loopback pairs (Windows).
 - **Configurable IP Checkers** — the public IP checker pool can be supplied via `HOST_IP_CHECKERS_LIST` to monitor the server's outbound IP.
+- **Windows Launch Modes** — interactive (TUI when a terminal is attached), background (`server background`), and Windows Service (`sc start proxy-iroh`). The service is compiled in with `--features daemonize` and installs via `server install`.
 
 ## Architecture
 
@@ -35,7 +36,7 @@ An authenticated, high-performance SOCKS5 and UDP proxy server powered by Iroh, 
                      v
              [proxy-iroh Server]  ◄──────────────►  [Central Hub]
                      |                            on-chain registry
-                     |                            (ALPN proxy/srv/0)
+                     |                            (ALPN proxy/svc/0)
                      +---- Tunnel Hello HMAC verify
                      |
                      +---- CLIENT_TYPE: on-chain check ──┐
@@ -127,6 +128,47 @@ Appends `CiGPeerApp/db` to the following base directory:
 - Otherwise, the server uses `$HOME/.local/share`.
 Example: `/home/alice/.local/share/CiGPeerApp/db`
 
+## Windows Launch Modes
+
+Three ways to run the server on Windows, each with different persistence and console behaviour. Linux users continue to wrap the binary with their own service manager (`systemd`, `runit`, `openrc`, etc.).
+
+| Mode | Invocation | Console | TUI | Survives logoff |
+|---|---|---|---|---|
+| Interactive | `server.exe` | attached | yes (if terminal) | no |
+| Background | `server.exe background` | detached | no | no |
+| Service | `sc start proxy-iroh` | none | no | yes |
+
+### Interactive
+
+Double-click `server.exe` or run it from a terminal. The TUI renders when `stdout` is a terminal; otherwise tracing writes only to `server_app.log`. Stop with `q`, `Esc`, or `Ctrl-C`.
+
+### Background
+
+```bat
+server.exe background
+```
+
+Spawns a detached child with no console and no TUI, prints its PID, and returns to the prompt. The child is not registered with SCM — it survives until killed or the session ends.
+
+```bat
+taskkill /PID <pid> /F
+```
+
+### Service
+
+Requires a build with `--features daemonize`, and an elevated prompt for install/uninstall.
+
+```bat
+server.exe install
+sc start proxy-iroh
+sc stop proxy-iroh
+server.exe uninstall
+```
+
+The service runs as `LocalSystem`, auto-starts on boot, and restarts are managed by the operator via `sc failure proxy-iroh reset= 0 actions= restart/5000`. Logs and the sled database live in the service account's `%LOCALAPPDATA%\CiGPeerApp` — `C:\Windows\System32\config\systemprofile\AppData\Local\CiGPeerApp` for `LocalSystem`. If the account was provisioned in a user session, either re-register from the service context or migrate the data directory before starting.
+
+See [`SETUP.win.daemon.md`](SETUP.win.daemon.md) for the complete walkthrough.
+
 ## Central Hub Integration
 
 The central hub maintains the on-chain registry used for client address verification. The server connects to it on a dedicated Iroh endpoint that is separate from the client-facing listener.
@@ -136,7 +178,7 @@ The central hub maintains the on-chain registry used for client address verifica
 | Endpoint | Bind address | ALPN | Purpose |
 |---|---|---|---|
 | Client-facing | `ENDPOINT_BIND_ADDRESS` (default `0.0.0.0:44444`) | `socks5/1` | Accepts incoming SOCKS5/tunnel connections |
-| Hub-facing | `ENDPOINT_BIND_ADDRESS_CENTRAL_HUB` (default `0.0.0.0:44445`) | `proxy/srv/0` | Connects to the hub for registration and on-chain verification |
+| Hub-facing | `ENDPOINT_BIND_ADDRESS_CENTRAL_HUB` (default `0.0.0.0:44445`) | `proxy/svc/0` | Connects to the hub for registration and on-chain verification |
 
 Both endpoints use the same relay (`RELAY_URL_PUBLIC`) and the same pkarr publisher, but independent secret keys (`endpoint_key` and `central_endpoint_key` respectively) so a compromise of one does not expose the other.
 

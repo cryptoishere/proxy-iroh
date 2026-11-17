@@ -1,4 +1,4 @@
-# SETUP.win.d.md
+# SETUP.win.bin.md
 
 # Windows Setup and Background Server
 

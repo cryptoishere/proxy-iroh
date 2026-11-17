@@ -7,12 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-17
+
+On-chain client address verification is deferred to a future release. The work below is independent of that feature and ships first so the file-descriptor lifecycle can be validated in production without the on-chain check in the critical path.
+
+### Added
+
+- **Windows service mode.** With `cargo build --release --features daemonize` (or the pre-built release that ships with the feature enabled), the binary accepts three additional subcommands:
+  - `server install` — registers the binary with the Service Control Manager as `proxy-iroh`, `AutoStart`, running as `LocalSystem`.
+  - `server uninstall` — removes the service registration.
+  - `server service` — invoked by SCM at boot; runs the server with no console and no TUI, reporting status transitions to SCM.
+  
+  Installation and uninstallation require an elevated prompt. `sc start proxy-iroh` / `sc stop proxy-iroh` control the service lifecycle. Logs are written to the service account's `%LOCALAPPDATA%\CiGPeerApp\server_app.log` (`C:\Windows\System32\config\systemprofile\AppData\Local\CiGPeerApp` for `LocalSystem`).
+- **`background` subcommand on Windows.** Re-execs the binary detached, with no console and no TUI, surviving the parent prompt. Prints the child PID; stop with `taskkill`. Complements the interactive and service modes.
+- **`daemonize` cargo feature.** Gates the `windows-service` dependency and the service module. Builds without the feature compile on all platforms and refuse the three service subcommands with a clear error; `background` remains available.
+- **`ShutdownHandle`.** A single shared shutdown primitive driven by Ctrl-C (interactive), SCM stop (service), or the TUI quit key. Preserves the existing double-signal force-exit behaviour: first trigger drains connections, second calls `std::process::exit(1)`.
+- **`RELAY_HARD_IDLE_SECS` (default `600`).** Per-relay ceiling for relays whose client and destination are both still open. `RELAY_IDLE_SECS` (60 s) continues to govern half-closed relays. The hard timeout covers the case that was previously unbounded: a background client keeping the QUIC Connection alive via keepalives, with browser-side connections the destination never FINed — the relay saw no traffic, neither close flag was set, and the timeout never fired. On a long-lived client this accumulated one relay per abandoned browser tab over a full day.
+
+### Changed
+
+- **`pump_bi` accepts a cancellation token.** The pump now selects each direction against the token, so cancellation from any sibling task propagates within one poll cycle. Previously the pump waited only on the iroh stream futures; when a QUIC Connection closed without the stream futures erroring promptly (a known edge case when the peer resets without a stream-level frame), the pump kept the tokio half of the socketpair open, the mio side never saw EOF, and the relay's FDs stayed pinned.
+- **All per-Connection cancellation sites re-enabled.** Five sites in the per-Connection task — `accept_bi()` error, socketpair error, mio handoff error, bridge-to-iroh error, and end-of-task cleanup — were commented out during earlier debugging and never restored. Their surrounding comments still described the intended behaviour; the code did not perform it. With the pump now honoring the token, these calls are the mechanism by which internal errors cascade to the pump.
+- **Startup validation.** The server refuses to start with `SOCKS5_TUNNEL_ENCRYPTION=true` and `SOCKS5_SIGNATURE_AUTH=false`. That combination cannot serve a working tunnel client — the Hello cannot be verified because `signature_config` is `None` — and would silently fall back to the plaintext SOCKS5 path, contradicting the operator's intent in setting the tunnel flag. The mirror check (`signature=true`, `tunnel=false`) already existed and is unchanged.
+- **`Relay` cipher state is now optional.** `Encryptor` and `Decryptor` are wrapped in `Option`, matching the reality that in plaintext modes there is no tunnel to encrypt or decrypt. The relay behaves as a transparent byte pipe when both are `None`, and as a framed relay when both are `Some`. The invariant "tunnel enabled implies cipher present" is enforced by the startup check and the `TunnelWelcome` transition that installs the cipher before `Responding` is reachable, not by a runtime assert.
+- **`CONN_HARD_IDLE_SECS` (default `300`) documented** in the README configuration table. The watchdog that fires on this timer is what drives `conn_ctoken` cancellation for a Connection whose transport has gone silent; without the pump honoring the token (above), the watchdog had no effect on pinned FDs.
+
+### Fixed
+
+- **Pump's error-path socketpair shutdown was a no-op.** The shutdown call constructed the async future and dropped it without polling, so the write side never closed on the error path and the relay's half-close cascade stalled. Shutdown now runs unconditionally after the copy future returns, on both success and error.
+- **Per-relay FDs accumulated for the lifetime of a background client.** Relays with both sides open and no traffic were never timed out, because the timeout required one side to be closed before checking activity. A client left running kept every Connection alive with its keepalive, so the Connection never closed and each abandoned browser-tab relay persisted indefinitely — reaching ~700 FDs over a day. `RELAY_HARD_IDLE_SECS` closes this case.
+- **Plaintext authentication modes panicked at the relay transition.** Modes 1 and 2 (`SOCKS5_TUNNEL_ENCRYPTION=false`) reached `finish_into_relay` with `encryptor` and `decryptor` both `None`, where the relay transition asserted a tunnel was active and terminated the process with `PANIC!`. The assert was correct for its original assumption — that the relay transition only occurs on the tunnel path — but that assumption has been false since plaintext modes were added at the handshake level. With the `Relay` change above, plaintext handshakes now complete their relay with pass-through semantics: bytes read from the client are forwarded to the remote unchanged, and bytes read from the remote are forwarded to the client unchanged. Tunnel modes are unaffected because `encryptor`/`decryptor` are still `Some` on that path, verified by the startup check and by `pending_switch` installation in the `TunnelWelcome` transition.
+
 ## [0.6.1] - 2026-11-16
 
 ### Added
 
 - **On-chain client address verification.** When `SOCKS5_SIGNATURE_AUTH=true` and a client presents `sig_type = CLIENT_TYPE`, the server queries the central hub to confirm the client's wallet address is registered on chain and not revoked before sending the `Welcome`. Only a positive response (`client_address_on_chain: true`) allows the tunnel to proceed. Every other outcome — hub unreachable, malformed response, timeout, or a negative result — closes the connection **before** any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check entirely and behave exactly as in 0.6.0.
-- **Central Hub transport integration.** The server maintains a live Iroh connection to the central hub on ALPN `proxy/srv/0` for on-chain verification queries, alongside the client-facing endpoint on ALPN `socks5/1`. The hub connection is lazily re-established on demand, so a hub restart does not require a server restart.
+- **Central Hub transport integration.** The server maintains a live Iroh connection to the central hub on ALPN `proxy/svc/0` for on-chain verification queries, alongside the client-facing endpoint on ALPN `socks5/1`. The hub connection is lazily re-established on demand, so a hub restart does not require a server restart.
 - **`CENTRAL_ENDPOINT_SNI` / `CENTRAL_ENDPOINT_SNI_PORT`** — hub hostname and port used for initial registration and verification queries.
 - **`TARGET_ENDPOINT_X1_CENTRAL_HUB_13`** — the central hub's Iroh `EndpointId`.
 - **`ENDPOINT_BIND_ADDRESS_CENTRAL_HUB`** (default `0.0.0.0:44445`) — bind address for the hub-facing Iroh endpoint.
@@ -109,7 +140,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.1...v0.5.2
