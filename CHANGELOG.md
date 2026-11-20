@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3-rc.1] - 2026-11-20
+
+### Added
+- Dual-signed attestation over a tunnel-only transport
+
 ## [0.6.2] - 2026-11-17
 
 On-chain client address verification is deferred to a future release. The work below is independent of that feature and ships first so the file-descriptor lifecycle can be validated in production without the on-chain check in the critical path.
@@ -141,6 +146,7 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
 [Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...HEAD
+[0.6.3-rc.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.3-rc.1
 [0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
