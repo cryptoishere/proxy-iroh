@@ -7,9 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3-rc.2] - 2026-11-20
+
+### Fixed
+
+- Fixed central hub transport frame decoding and message type handling.
+- Unified inbound frame parsing for client verification, session registration, and server reporting.
+- Fixed Postcard serialization mismatch between the proxy server and central hub.
+- Corrected verification message framing to use the shared length-prefixed protocol.
+- Fixed response handling for session registration and server reporting.
+
+### Changed
+
+- Introduced a dedicated message type for on-chain client verification.
+- Standardized transport message structure using a length-prefixed frame followed by a message type and Postcard payload.
+- Separated frame extraction from message deserialization to simplify protocol handling.
+
 ## [0.6.3-rc.1] - 2026-11-20
 
 ### Added
+
 - Dual-signed attestation over a tunnel-only transport
 
 ## [0.6.2] - 2026-11-17
@@ -146,7 +163,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
 [Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...HEAD
-[0.6.3-rc.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.3-rc.1
+[0.6.3-rc.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.2
+[0.6.3-rc.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.1
 [0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
