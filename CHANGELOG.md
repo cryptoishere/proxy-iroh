@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3-rc.3] - 2026-11-20
+
+### Adjustments
+
 ## [0.6.3-rc.2] - 2026-11-20
 
 ### Fixed
@@ -163,6 +167,7 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
 [Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...HEAD
+[0.6.3-rc.3]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.3
 [0.6.3-rc.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.2
 [0.6.3-rc.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.1
 [0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
