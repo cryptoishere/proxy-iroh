@@ -17,6 +17,7 @@ An authenticated, high-performance SOCKS5 and UDP proxy server powered by Iroh, 
 - **Server-Side Port Allowlist** — default-deny egress on the server. Only the ports named in `SOCKS5_ALLOWED_PORTS` may be reached; SMTP, IMAP, POP3, RDP, MySQL, PostgreSQL, Redis, MongoDB, Elasticsearch, VNC, SMB, LDAP, and everything else are blocked by default.
 - **Server-Side IP Policy (SSRF guard)** — blocks loopback, RFC 1918, link-local, CGNAT, IPv6 ULA, and IPv6 link-local destinations after DNS resolution, protecting internal infrastructure and cloud metadata endpoints from being reached via the tunnel.
 - **On-Chain Client Verification** — when a client presents `sig_type = CLIENT_TYPE`, the server queries the central hub before completing the tunnel handshake. Addresses not registered on chain, or explicitly revoked, are rejected before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
+- **Dual-Signed Bandwidth Attestation** — server and client independently report per-session byte counts to the central hub. The hub credits `min(server, client)`, so one-sided inflation is self-defeating. Collusion resistance relies on external evidence (synthetic clients, cohort analysis, relay-side accounting), not cryptography. See [SECURITY.md](SECURITY.md).
 - **Cross-Platform** — native support for both Linux and Windows. The server uses a unified `lib/bridge.rs` to abstract `AF_UNIX` socket pairs (Linux) and loopback pairs (Windows).
 - **Configurable IP Checkers** — the public IP checker pool can be supplied via `HOST_IP_CHECKERS_LIST` to monitor the server's outbound IP.
 - **Windows Launch Modes** — interactive (TUI when a terminal is attached), background (`server background`), and Windows Service (`sc start proxy-iroh`). The service is compiled in with `--features daemonize` and installs via `server install`.
@@ -180,7 +181,15 @@ The central hub maintains the on-chain registry used for client address verifica
 | Client-facing | `ENDPOINT_BIND_ADDRESS` (default `0.0.0.0:44444`) | `socks5/1` | Accepts incoming SOCKS5/tunnel connections |
 | Hub-facing | `ENDPOINT_BIND_ADDRESS_CENTRAL_HUB` (default `0.0.0.0:44445`) | `proxy/svc/0` | Connects to the hub for registration and on-chain verification |
 
-Both endpoints use the same relay (`RELAY_URL_PUBLIC`) and the same pkarr publisher, but independent secret keys (`endpoint_key` and `central_endpoint_key` respectively) so a compromise of one does not expose the other.
+The hub-facing `proxy/svc/0` stream carries length-prefixed frames. Since 0.7.0 every frame begins with a discriminator byte:
+
+| `msg_type` | Payload | Purpose |
+|---|---|---|
+| `0x01` | `ProxyFrameMetadata` | On-chain verify (existing) |
+| `0x02` | `SessionOpen` | Session registration before `Welcome` |
+| `0x03` | `ServerReport` | Per-session byte counts at relay teardown |
+
+`SessionOpen` and `ServerReport` carry `[u8; 16] session_id`, `[u8; 20] server_address`, `[u8; 20] client_address`, and a `PathType` (`Direct` / `Relay`). `ServerReport` additionally carries `bytes_ingress`, `bytes_egress`, `started_at`, `ended_at`, and a per-server monotonic `nonce`. The hub credits `min(server_report, client_attestation)` per session — see [SECURITY.md](SECURITY.md) for the economic model.
 
 ### Startup sequence
 
@@ -212,12 +221,12 @@ When a client presents `sig_type = CLIENT_TYPE` under `SOCKS5_SIGNATURE_AUTH=tru
 
 ### Handshake flow
 
-1. Client sends `Hello` with `sig_type = CLIENT_TYPE` and its wallet address.
-2. Server derives `derive_client(M, address)` from the master secret `M` and verifies the Hello HMAC. At this point the client has cryptographically proven it holds `derive_client(M, address)` — no other party could have produced the tag.
-3. Server opens a bidirectional stream to the hub and sends `ProxyFrameMetadata { server_address, client_address }` as a length-prefixed postcard frame.
-4. Hub answers `ProxyCallerResponse { client_address_on_chain: bool }` in the same framing.
-5. `client_address_on_chain: true` → `Welcome` is sent, tunnel proceeds.
-6. Any other outcome → connection is closed before the `Welcome`.
+1. Client sends `Hello` with `sig_type = CLIENT_TYPE`, its wallet address, and a client-chosen 16-byte `session_id`. The Hello HMAC covers all three.
+2. Server derives `derive_client(M, address)` and verifies the Hello HMAC. The client has cryptographically proven it holds `derive_client(M, address)`.
+3. Server sends `ProxyFrameMetadata { server_address, client_address }` to the hub; the hub answers `ProxyCallerResponse { client_address_on_chain: bool }`.
+4. On `true`, the server sends `SessionOpen { session_id, server_address, client_address, started_at, path_type }` on the same iroh runtime and waits for the hub's ack. `Welcome` is queued only after the ack arrives.
+5. Any failure in steps 3 or 4 — hub unreachable, timeout, malformed response, negative result, `SessionOpen` rejection — closes the connection before `Welcome`. Fail-closed.
+6. During the session the two sides report independently: the server sends `ServerReport` at relay teardown (on `proxy/svc/0`); the client POSTs `ClientAttestation` to `/api/v1/bandwidth/attest` through its own tunnel (HTTPS). The hub credits `min(server, client)`. See [SECURITY.md](SECURITY.md).
 
 Result caching: a successful or negative verification is cached per-address for 60 s to avoid re-querying the hub on every new `Connection` from the same client during a browsing session. Errors are **not** cached.
 
@@ -343,18 +352,18 @@ The `true` / `false` combination is refused because the tunnel handshake's Hello
 
 ### On-chain client verification
 
-Under `SOCKS5_SIGNATURE_AUTH=true`, a `CLIENT_TYPE` handshake is not completed until the central hub confirms the client's wallet address is on chain and not revoked. The check runs after HMAC verification and before `Welcome` is queued. Every failure mode — hub unreachable, timeout, malformed response, or a negative result — closes the connection before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
+Under `SOCKS5_SIGNATURE_AUTH=true`, a `CLIENT_TYPE` handshake is not completed until the central hub confirms the client's wallet address is on chain and not revoked. Every failure mode closes the connection before any tunnel bytes are exchanged. `SYSTEM_TYPE` handshakes bypass the check.
 
-See [On-Chain Client Verification](#on-chain-client-verification) for the full handshake and failure semantics.
+### Bandwidth attestation
+
+The hub credits `min(server, client)` per session: the server's `ServerReport` and the client's `ClientAttestation` must agree. One-sided inflation is self-defeating; collusion is bounded by external evidence (synthetic clients, cohort analysis, relay-side accounting), not by cryptography. The economic model and its limits are documented in [SECURITY.md](SECURITY.md).
 
 ### Trust model
 
-The server and the hub both hold the master secret `M`. Both can derive `derive_client(M, addr)` for any address. This produces two properties that must be understood before choosing a mode:
+The server and the hub both hold the master secret `M`. Both can derive `derive_client(M, addr)` for any address.
 
-- **Client-to-client impersonation is impossible.** Client B cannot produce a valid Hello for address A because B does not hold `derive_client(M, A)`. The HMAC in the Hello binds the claimed address to possession of the corresponding derivation.
-- **Server-to-client impersonation is possible.** The server holds `M` and can derive any client's keys, so it can forge a valid Hello for any address. The on-chain check bounds which addresses can be targeted — only those currently registered — but does not prevent the server from impersonating a registered client to itself. This is acceptable for a proxy where the server already sees all plaintext; it means the server cannot provide third-party proof that a session originated from a client rather than from itself.
-
-For deployments where third-party auditability matters, the derivation scheme would need to be replaced with wallet-private-key signatures over the Hello, which is a wire-format change and not on the current roadmap.
+- **Client-to-client impersonation is impossible.** Client B cannot produce a valid Hello for address A.
+- **Server-to-client impersonation is possible.** The server holds `M` and can forge a valid Hello for any address. The on-chain check bounds which addresses can be targeted but does not prevent the server from impersonating a registered client to itself. This is acceptable for a proxy where the server already sees all plaintext.
 
 ### Privacy
 

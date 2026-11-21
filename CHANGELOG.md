@@ -7,31 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.3-rc.3] - 2026-11-20
+## [0.7.0] - 2026-11-22
 
-### Adjustments
-
-## [0.6.3-rc.2] - 2026-11-20
-
-### Fixed
-
-- Fixed central hub transport frame decoding and message type handling.
-- Unified inbound frame parsing for client verification, session registration, and server reporting.
-- Fixed Postcard serialization mismatch between the proxy server and central hub.
-- Corrected verification message framing to use the shared length-prefixed protocol.
-- Fixed response handling for session registration and server reporting.
-
-### Changed
-
-- Introduced a dedicated message type for on-chain client verification.
-- Standardized transport message structure using a length-prefixed frame followed by a message type and Postcard payload.
-- Separated frame extraction from message deserialization to simplify protocol handling.
-
-## [0.6.3-rc.1] - 2026-11-20
+Dual-signed attestation. Server and client now independently report per-session
+byte counts to the central hub; the hub credits `min(server, client)`, so one-sided
+inflation is self-defeating. See [SECURITY.md](SECURITY.md) for the economic model
+and its limits.
 
 ### Added
 
-- Dual-signed attestation over a tunnel-only transport
+- **`SessionOpen` message** on ALPN `proxy/svc/0` — the server records the
+  client-chosen `session_id` at the hub before sending `Welcome`. The hub rejects
+  any `ServerReport` for a session it never saw open.
+- **`ServerReport` message** on ALPN `proxy/svc/0` — sent at relay teardown with
+  byte counts, `started_at`/`ended_at`, `path_type`, and a per-server monotonic
+  `nonce`. Replayed or out-of-window reports are rejected.
+- **`ClientAttestation` HTTPS endpoint** `/api/v1/bandwidth/attest` — the client
+  posts cumulative byte counts to the hub through its own SOCKS5 tunnel. The
+  server can drop the traffic (zero credit for itself) but cannot read, modify, or
+  forge the payload (client HMAC + TLS).
+- **Wire format v4** — the tunnel `Hello` now carries a 16-byte client-chosen
+  `session_id` between `sig_type` and `addr_len`, covered by the HMAC.
+  `MAGIC_HELLO` bumped to `S5-TUNNEL-v4`, `HELLO_FIXED_LEN` from 74 to 90.
+- **`PathType` (`Direct` / `Relay`) plumbing** — captured from the iroh
+  `Connection` at accept and reported per session. The hub discounts direct-path
+  sessions relative to relay-verified ones.
+- **Separate client attestation listener** (`127.0.0.1:1081` by default) — avoids
+  a loop where attestation traffic is re-captured by the TUN adapter.
+
+### Changed
+
+- **ALPN `proxy/svc/0` wire is now discriminator-prefixed.** Every frame is
+  `[u32 len][u8 msg_type][postcard payload]`, where `msg_type` is `0x01` (verify),
+  `0x02` (`SessionOpen`), or `0x03` (`ServerReport`). This is wire-breaking:
+  server and hub must be deployed together.
+- **`SessionOpen` is a precondition for `Welcome`** on `CLIENT_TYPE` handshakes.
+  On-chain verification and session registration run sequentially on the iroh
+  runtime; exactly one result reaches the mio loop. A hub rejection closes the
+  connection before the `Welcome` is sent. Fail-closed.
+- **`ClientAttestation` carries the client's real `session_id`.** The hub can now
+  key `ServerReport` and `ClientAttestation` under the same id, which is what makes
+  `min()` computable.
+
+### Fixed
+
+- Fixed central hub transport frame decoding and message-type handling.
+- Unified inbound frame parsing for client verification, session registration, and
+  server reporting.
+- Fixed Postcard serialization mismatch between the proxy server and central hub.
+- Corrected verification message framing to use the shared length-prefixed
+  protocol.
+- Fixed response handling for session registration and server reporting.
+- Fixed panic on relay teardown when `tokio::spawn` was called from the mio main
+  thread (no reactor context); now uses `rt_handle.spawn`.
 
 ## [0.6.2] - 2026-11-17
 

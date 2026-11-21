@@ -112,7 +112,7 @@ Client sends `sig_type = CLIENT_TYPE (0x01)` plus its wallet address. Hello tag 
 
 ---
 
-## Mode 5 — Tunnel HMAC, CLIENT + on-chain check (planned)
+## Mode 5 — Tunnel HMAC, CLIENT + on-chain check
 
 ```bash
 SOCKS5_TUNNEL_ENCRYPTION=true
@@ -177,6 +177,6 @@ Internet-facing?
 | 2 | ✗ | password only | change password | no | ✓ |
 | 3 | ✓ | ✗ | ✗ | no | ✓ |
 | 4 | ✓ | ✓ | ✗ | no | ✓ |
-| 5 | ✓ | ✓ | ✓ | **yes** | planned |
+| 5 | ✓ | ✓ | ✓ | **yes** | ✓ |
 
-Useful progression: **1 → 2 → 3 → 4 → 5**. Any internet-facing deployment should be at Mode 3 or above; Mode 5 is the target once available.
+Any internet-facing deployment should be at Mode 3 or above; Mode 5 is recommended when revocation or bandwidth credit matters.
