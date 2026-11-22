@@ -194,10 +194,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...HEAD
-[0.6.3-rc.3]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.3
-[0.6.3-rc.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.2
-[0.6.3-rc.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.6.3-rc.1
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.5.2...v0.6.0
