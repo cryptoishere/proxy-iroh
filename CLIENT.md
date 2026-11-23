@@ -2,19 +2,27 @@
 
 The official client and TUN/VPN bridge for the `proxy-iroh` ecosystem.
 
-The client provides a local SOCKS5 endpoint (`127.0.0.1:18080`) that applications can connect to, and transparently routes the traffic through an encrypted Iroh QUIC session to the remote `proxy-iroh` server. It also includes a system-wide TUN mode to capture all host traffic without requiring application-level proxy configuration.
+The client provides a local SOCKS5 endpoint (`127.0.0.1:1080`) that applications can connect to, and transparently routes the traffic through an encrypted Iroh QUIC session to the remote `proxy-iroh` server. It also includes a system-wide TUN mode to capture all host traffic without requiring application-level proxy configuration.
 
 *Note: This document covers the Client implementation. For the Server implementation, please see [README.md](README.md).*
 
 ## Features
 
-- **Local SOCKS5 Proxy** — exposes a standard SOCKS5 interface on `127.0.0.1:18080`.
+- **Local SOCKS5 Proxy** — exposes a standard SOCKS5 interface on `127.0.0.1:1080`.
 - **System-wide VPN (TUN) Mode** — a single `sudo ./vpn_client` invocation brings up the tunnel, installs routing, and captures all host traffic.
 - **Bootstrap-Before-Capture Ordering** — the relay is resolved and a full SOCKS5 round-trip to a known destination succeeds *before* any routing or firewall rule is installed. A partially-configured VPN never takes over the network.
 - **HTTP CONNECT Translation** — automatically translates HTTP `CONNECT` requests into SOCKS5 for compatibility with browser proxy settings.
 - **V2 CONNECT-UDP & Fragmentation** — tunnels WebTransport, HTTP/3, and raw UDP by fragmenting packets at 900 bytes to bypass Iroh's MTU limits.
 - **Source-Address Routing Exemption** — only sockets iroh has explicitly bound to the physical interface IP are exempted from the tunnel; every other process, including root, is captured. This closes the historical "any root process bypasses the VPN" leak.
 - **Fail-Closed Kill Switch** — if any part of setup fails (routing, firewall, TUN), the client rolls back and exits rather than leaving the host in a partially-tunneled state.
+- **Local CIDR Bypass (`bypass_cidrs`)** — Docker bridges, VM host gateways, and
+  other local subnets can be explicitly pinned to a physical interface via
+  more‑specific routes in the VPN table. Longest‑prefix‑match guarantees the
+  bypass always wins over the split‑default `/1` routes, with no impact on
+  tunnel coverage for every other destination. Fixes the common
+  "`docker -p 127.0.0.1:5432:5432` becomes unreachable while the VPN is up"
+  class of problems without touching the server's `SOCKS5_BLOCK_PRIVATE_IPS`
+  or `SOCKS5_ALLOWED_PORTS` policy.
 - **Transactional Cleanup** — the client tracks exactly which resources it installed and reverts only those, in reverse order, on every exit path (clean shutdown, Ctrl-C, or setup failure). Coexisting VPNs using other route tables or rule priorities are unaffected.
 - **DNS Through the Tunnel by Default** — every DNS query on the host is captured by the tunnel like any other traffic. On hosts using `systemd-resolved` with DoT upstreams (the common Linux configuration), the tunnel carries the DoT stream to the server, which forwards it to the configured DoT provider. No plaintext DNS reaches the ISP, and the historical `systemd-resolved` UID exemption is gone. Requires port `853` in the server's `SOCKS5_ALLOWED_PORTS` (included in the default since 0.5.2). The `VPN_MANAGE_DNS` rewrite of `/etc/resolv.conf` is **not** the mechanism — it is a separate opt-in that requires a server-side DNS handler and is currently disabled by default.
 - **Encrypted Transport** — ChaCha20-Poly1305 for all data sent over Iroh.
@@ -36,7 +44,7 @@ The client provides a local SOCKS5 endpoint (`127.0.0.1:18080`) that application
 [proxy-iroh Server]
 ```
 
-For standard proxying, the client listens on a local port and parses SOCKS5/HTTP. For VPN mode, it creates a TUN device, routes system traffic through it, and uses `smoltcp` to terminate TCP/UDP flows before bridging them to the local SOCKS5 listener.
+> For standard proxying, the client listens on a local port and parses SOCKS5/HTTP. For VPN mode, it creates a TUN device (Linux `tun` driver, Windows WinTun), routes system traffic through it, and uses `smoltcp` to terminate TCP/UDP flows before bridging them to the local SOCKS5 listener over a `socketpair(2)` on Linux or a loopback TCP pair on Windows. On Windows, `Wintun` needs `wintun.dll` next to the executable or on `PATH`; the WinTun adapter is named by `VPN_TUN_NAME` (default `tun0`).
 
 The VPN mode is driven by the `VpnClient` lifecycle in `lib::vpn::client`:
 
@@ -71,8 +79,22 @@ Any failure before `Connected` rolls back to `Disconnected`. Any failure after `
 
 | Platform | Local pair mechanism | TUN/VPN Support |
 |---|---|---|
-| Linux | `AF_UNIX` socket pair | ✅ Yes (requires `CAP_NET_ADMIN`) |
-| Windows | Loopback TCP/UDP pair | ❌ No (planned) |
+| Linux | `AF_UNIX` `socketpair(2)` | ✅ Yes — requires `CAP_NET_ADMIN` (or root) and `iptables` |
+| Windows | Loopback TCP pair on `127.0.0.1:0` | ✅ Yes — requires an elevated token (Administrator) and `wintun.dll` on `PATH` or beside the executable |
+| macOS | (planned) | ❌ No |
+| Android | (planned) | ❌ No |
+
+The two non‑Linux platforms use the same lifecycle, same `InstallConfig`,
+and same policies; only the underlying command surfaces differ:
+
+| Operation | Linux | Windows |
+|---|---|---|
+| Split‑default routes | `ip route … table <n>` | `route add` (main FIB, metric 1) |
+| Source‑address exemption | `ip rule from <ip> lookup main priority 90` | n/a — `route.exe` has no `from` predicate. Relay IPs are pinned via `/32` routes to the physical `ifIndex` |
+| IPv6 block | `ip -6 route add unreachable default metric 1` | n/a — the tunnel is IPv4‑only; `IrohClientConfig` clears IPv6 transports |
+| Kill switch | `iptables -m owner ! --uid-owner root -o <phys> -j REJECT` | `netsh advfirewall` block rule scoped to `interface="<phys>"`, plus an allow rule for `program="<exe>"` |
+| DNS | Save/restore `/etc/resolv.conf` (symlink‑aware) | `netsh interface ipv4 set dnsservers …` — restores via DHCP or explicit static list |
+| Interface lookup | `ip route get` | `Get‑NetRoute` / `Get‑NetAdapter` via PowerShell |
 
 ---
 
@@ -92,7 +114,8 @@ Any failure before `Connected` rolls back to `Disconnected`. Any failure after `
 | `IROH_ADVERTISE_PORT` | No | Public port to advertise to the relay. |
 | `VPN_TUN_NAME` | No | TUN device name. Default `tun0`. |
 | `VPN_ROUTE_TABLE` | No | Route table used for tunnel routes. Default `1600000`. Override if that collides with another VPN. |
-| `VPN_MANAGE_DNS` | No | If truthy, the client saves and rewrites `/etc/resolv.conf` to point at the tunnel gateway (`10.0.0.1`), restoring it on exit. **Requires a DNS handler on `10.0.0.1:53` on the server, which is not yet implemented.** Do not enable on hosts where `systemd-resolved` is running with DoT upstreams — the client's own resolver already works through the tunnel if `853` is in `SOCKS5_ALLOWED_PORTS` on the server, and rewriting `/etc/resolv.conf` breaks `dig` and any tool that reads it directly. Default `false`. |
+| `VPN_BYPASS_CIDRS` | No | Comma‑separated `<CIDR>=<iface>` pairs installed as more‑specific routes in `VPN_ROUTE_TABLE` so they bypass the tunnel. **Linux:** `<iface>` is the `dev` name (`docker0`, `br-xxxxx`). **Windows:** `<iface>` is an interface alias, or **empty** to auto‑resolve from `Get-NetIPAddress`; if no host interface owns the CIDR (Docker Desktop/WSL2 internal), the entry is logged and skipped. Example: `10.10.20.0/28=br-9acee09147e0,172.17.0.0/16=docker0`. Get the exact `<iface>` on Linux via `ip -br link show type bridge`; on Windows via `Get-NetAdapter`. Default: empty. |
+| `VPN_MANAGE_DNS` | No | If truthy, the client saves and rewrites `/etc/resolv.conf` to point at the tunnel gateway (`10.0.0.1`), restoring it on exit. **Requires a DNS handler on `10.0.0.1:53` on the server, which is not yet implemented.** Do not enable on hosts where `systemd-resolved` is running with DoT upstreams — the client's own resolver already works through the tunnel if `853` is in `SOCKS5_ALLOWED_PORTS` on the server, and rewriting `/etc/resolv.conf` breaks `dig` and any tool that reads it directly. On Windows the argument passed to `netsh` is `<tun_name>=<gateway>` (e.g. `tun0=10.0.0.1`), so the client knows which adapter to rewrite. Default `false`. |
 
 The client **does not** expose any setting corresponding to the server's `SOCKS5_ALLOWED_PORTS` or `SOCKS5_BLOCK_PRIVATE_IPS`. Those are enforced server-side and cannot be bypassed or weakened by the client. See [Egress control on the server](README.md#security-model) for what traffic will be refused.
 
@@ -110,12 +133,12 @@ TUNNEL_ENCRYPTION_SECRET="your_secret_here" \
 REGISTRATION_IDENT_ADDRESS="SMVV4fAq..." \
 TARGET_ENDPOINT_X1_SOCKS5_13="6d9640d..." \
 RELAY_URL_PUBLIC="https://relay.example.com" \
-./client_tunnel
+./lightweight-client
 ```
 
 Once running, configure your browser or use `curl`:
 ```bash
-curl -v --proxy socks5h://127.0.0.1:18080 https://smartholdem.io
+curl -v --proxy socks5h://127.0.0.1:1080 https://smartholdem.io
 ```
 
 ---
@@ -148,6 +171,11 @@ ip rule | grep -E 'priority (90|200)\b'
 3. **End-to-end test** (`vpn/client.rs`): performs a full SOCKS5 `CONNECT` to `1.1.1.1:443` through the local bridge. This exercises the tunnel handshake, the server relay, and the server's port policy before any traffic is captured. If it fails, the client shuts down and exits — nothing is installed.
 4. **TUN creation** (`vpn/tun_setup.rs`): creates `tun0` with IP `10.0.0.2/24` and MTU `1500`.
 5. **Routing and kill switch** (`vpn/leaks.rs`):
+   - Adds a more‑specific route for every entry in `VPN_BYPASS_CIDRS` **first**,
+     so they are the last thing torn down at shutdown. On Linux:
+     `ip route replace <cidr> dev <iface> table <n>`. On Windows: an on‑link
+     `route add <cidr> 0.0.0.0 if <ifIndex>` at metric 1. Longest‑prefix‑match
+     makes these beat the split‑default `/1` routes regardless of ordering.
    - Adds split-default routes (`0.0.0.0/1`, `128.0.0.0/1`) to the VPN route table only. `main` is untouched.
    - Blackholes `224.0.0.0/4`, `240.0.0.0/4`, and `255.255.255.255/32` so mDNS/SSDP/broadcast never reach the tunnel.
    - Blocks IPv6 with an `unreachable` default route.
@@ -186,6 +214,9 @@ Everything is **source-address based**, not UID based. There are no `uidrange` r
 | **Any IPv6 traffic** | **Blocked** | `ip -6 route add unreachable default metric 1` | No tunneled IPv6 exists in this build |
 | **iroh QUIC UDP socket** | **Bypass** | socket pre-bound to `192.168.0.12` via `bind_addr_with_opts` → matches `priority 90` | Source is `192.168.0.12` |
 | **iroh TCP relay dials** (`iroh_relay::client`) | **Bypass** | `/32` route in table `1600000` for each resolved relay IP, with `src 192.168.0.12` forced | More specific than `default dev tun0`, so it wins |
+| **Docker bridge IP without `bypass_cidrs`** (e.g. `10.10.20.2`) | **Tunnel** | `0.0.0.0/1` → `tun0` | Server `is_forbidden_ip` rejects private targets with `REP=0x02` |
+| **Docker bridge IP with `bypass_cidrs`** | **Bypass** | `<cidr> dev <bridge_iface>` in table `1600000` | More specific than `/1`; never enters `tun0` |
+| **Relay IPs pinned to physical NIC** | **Bypass** | `<relay>/32 via <gw> dev <phys> src <transport>` | Already covered above; listed here for completeness |
 | **Relay hostname resolution** (bootstrap only) | **Bypass** | Happens before `priority 200` is installed | Uses the host resolver over the physical default route |
 | **A malicious root process that deliberately `bind()`s to `192.168.0.12`** | **Bypass** | Matches `priority 90` | Known limitation — see below |
 | **Traffic during bootstrap** (before routing is installed) | **Bypass** | No VPN rules exist yet | Brief; only the relay verification and connectivity test run in this window |
@@ -223,6 +254,49 @@ This is a fundamental limitation of source-address routing. Routing cannot disti
 - **Network-namespace isolation** of the transport.
 
 None of these are implemented. The current model is **fail-closed for ordinary processes (including root that does not deliberately bind the physical IP)** and **fail-open for a deliberate attacker with root**.
+
+**5. Bypass CIDRs — Docker bridges, VM gateways, loopback‑adjacent subnets.**
+
+`docker-proxy` (the default `userland-proxy: true`) opens a *second* TCP
+connection from `127.0.0.1:<ephemeral>` to the container's bridge IP, e.g.
+`10.10.20.2:5432`. Without a bypass, this destination matches `0.0.0.0/1
+dev tun0` and enters the tunnel. The server's `is_forbidden_ip` (RFC1918)
+rejects it with `REP=0x02`, and the user sees `EOFException` in DBeaver,
+`ECONNREFUSED` from `psql`, etc.
+
+`VPN_BYPASS_CIDRS` fixes this without weakening any policy. The client
+installs a route in `VPN_ROUTE_TABLE` that names the bridge as the egress
+interface. Because it is longer than `/1`, longest‑prefix‑match sends the
+traffic to the bridge instead of `tun0`.
+
+```bash
+# Linux — find the exact CIDR / interface
+ip -br addr show type bridge
+# br-9acee09147e0  10.10.20.1/28  ← CIDR = 10.10.20.0/28, iface = br-9acee09147e0
+
+sudo VPN_BYPASS_CIDRS=10.10.20.0/28=br-9acee09147e0 -E ./vpn_client
+```
+
+```powershell
+# Windows — Docker Desktop (WSL2 backend): the CIDR lives inside the VM,
+# the host has no interface on it, so the client logs
+#   "no Windows interface owns this CIDR; assuming Docker Desktop/WSL2
+#    internal — no host route needed"
+# and skips cleanly. 127.0.0.1:5432 from the host works because WSL2
+# localhostForwarding delivers it into the VM before any host route
+# exists.
+
+# Windows — Windows Server with native containers: the "nat" network
+# IS on the host.
+$env:VPN_BYPASS_CIDRS = "10.10.20.0/28=vEthernet (nat)"
+.\vpn_client.exe
+```
+
+**What this does *not* do:** it does not weaken server policy. The bypass
+route is client‑side only. Any traffic that *does* enter `tun0` (public
+internet, relay IPs already covered, any destination not in
+`VPN_BYPASS_CIDRS`) is still subject to `is_forbidden_ip` and
+`SOCKS5_ALLOWED_PORTS`.
 
 #### Blocked traffic — in detail
 
@@ -282,11 +356,9 @@ If `ip route get 1.1.1.1` shows `dev tun0 src 10.0.0.2`, the tunnel rule is in p
 
 #### What this model does not do
 
-- It does not prevent a root process from deliberately binding to the physical interface IP before connecting.
+- It does not preserve LAN multicast reachability (mDNS, SSDP, DHCP) — those are blackholed.
 - It does not tunnel IPv6.
-- It does not preserve LAN multicast reachability.
-- It does not provide a working DNS resolver to applications that bypass `systemd-resolved` when `VPN_MANAGE_DNS=true`.
-- It does not distinguish iroh's traffic from any other traffic that binds the physical IP. If you run a second process bound to `192.168.0.12`, that process also bypasses the tunnel. This is a design property of source-address routing, not a bug, but it must be understood before deploying the client on hosts where other services may bind the LAN IP.
+- It does not resurrect **public** addresses that the server's policy refuses (`REP=0x02`). Use `VPN_BYPASS_CIDRS` only for **local** CIDRs; there is no client-side way to override `is_forbidden_ip` or `SOCKS5_ALLOWED_PORTS` on the server.
 
 ---
 
@@ -307,10 +379,10 @@ The bootstrap phase never touches the tunnel; if it fails, the problem is upstre
 ### `vpn_client` exits during "Connecting" with "connectivity test failed"
 **Cause:** the full SOCKS5 round-trip through the tunnel did not succeed within 15 s. Either the server is down, the port policy refused `1.1.1.1:443` (unlikely, it is in the default allowlist), the transport handshake failed, or the server's `CONN_HARD_IDLE_SECS` / `IROH_READ_KILL_SECS` watchdog is firing incorrectly.
 
-**Fix:** run the SOCKS5 mode (`./client_tunnel`) and try the same connection manually:
+**Fix:** run the SOCKS5 mode (`./lightweight-client`) and try the same connection manually:
 
 ```bash
-curl -v --proxy socks5h://127.0.0.1:18080 https://1.1.1.1:443
+curl -v --proxy socks5h://127.0.0.1:1080 https://1.1.1.1:443
 ```
 
 If that fails, the issue is on the tunnel or server side, not in the VPN lifecycle. The client refuses to install routing until this works, so a failure here leaves the host untouched and safe to retry.
@@ -341,6 +413,93 @@ If `ss` shows iroh bound to `0.0.0.0`, the source-address rule never matches, ir
 2. **IP policy** — the destination resolved to a loopback, RFC 1918, link-local, CGNAT, or IPv6 ULA address. This is intentional SSRF protection; there is no client-side workaround.
 
 **Fix:** This is not a client bug. Contact the server operator to adjust `SOCKS5_ALLOWED_PORTS` or `SOCKS5_BLOCK_PRIVATE_IPS` on the server.
+
+### Docker Postgres / MySQL / Redis unreachable while VPN is up
+
+**Symptom:** DBeaver shows `EOFException`, `psql` shows `ECONNREFUSED`,
+`redis-cli` hangs. Stopping `vpn_client` fixes it. `tcpdump -ni tun0
+'port 5432'` shows SYN → SYN‑ACK → FIN with **no payload**.
+
+**Cause:** `docker-proxy` open a *second* connection from `127.0.0.1` to
+the container's bridge IP. That second hop is captured by `0.0.0.0/1 dev
+tun0`, forwarded to the server, and refused by `is_forbidden_ip` (RFC1918)
+with `REP=0x02`. From the client's perspective the TCP handshake succeeds
+(smoltcp on the client answers the SYN), the first payload byte
+(PostgreSQL `SSLRequest`) is ACKed, and then a 0‑byte FIN arrives — this
+is what `EOFException` in Java and `EOF on socket` in libpq actually mean.
+
+**Diagnose:**
+
+```bash
+# Linux — which bridge is the container on?
+docker network inspect <network> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+ip -br link show type bridge
+
+# The route docker-proxy actually takes
+sudo ip route get <container-ip>      # ← "dev tun0" = bug confirmed
+
+# Reproduce without DBeaver
+curl --socks5 127.0.0.1:18080 -sv telnet://<container-ip>:5432
+# "SOCKS5 reply: 05 02"  ← server-side policy reject
+```
+
+```powershell
+# Windows — Docker Desktop: the second hop lives inside WSL2, not the host FIB.
+Get-NetRoute -DestinationPrefix "10.0.0.0/8"  # host has no route to the container
+# ⇒ 127.0.0.1:5432 from the host is forwarded into the VM before any
+#    host routing exists; no bypass route is needed or possible.
+```
+
+**Fix:**
+
+```bash
+# Linux: bypass the bridge CIDR
+sudo VPN_BYPASS_CIDRS=<bridge-cidr>=<bridge-iface> -E ./vpn_client
+```
+
+```powershell
+# Windows (native containers): same syntax; the alias is the vEthernet name
+$env:VPN_BYPASS_CIDRS = "<bridge-cidr>=vEthernet (nat)"
+```
+
+**Alternative — eliminate the second hop entirely:**
+
+```yaml
+services:
+  postgres:
+    network_mode: host          # no docker-proxy, no bridge, no second hop
+    # ports: "127.0.0.1:5432:5432"   ← remove
+```
+
+With host networking, DBeaver → `127.0.0.1:5432` → Postgres directly. No
+route, no bypass, works with the VPN up or down.
+
+### Windows — "route already exists" or firewall rule not installed
+
+**Cause:** a previous `vpn_client.exe` was terminated without an
+opportunity to run `Drop` (Task Manager End Task, `Stop-Process -Force`,
+crash). The kill‑switch rules `proxy-iroh-block-out` and
+`proxy-iroh-allow-exe`, plus the split‑default and bypass routes, are
+still present.
+
+**Fix:**
+
+```powershell
+# Firewall rules
+netsh advfirewall firewall delete rule name="proxy-iroh-block-out"
+netsh advfirewall firewall delete rule name="proxy-iroh-allow-exe"
+
+# Routes installed by the VPN (safe to run even if some are absent)
+route delete 0.0.0.0   mask 128.0.0.0
+route delete 128.0.0.0 mask 128.0.0.0
+
+# Inspect the table
+Get-NetRoute | Where-Object { $_.DestinationPrefix -like "*0.0.0.0/1*" -or $_.DestinationPrefix -like "*128.0.0.0/1*" }
+```
+
+A clean restart of `vpn_client.exe` runs `Drop` on exit and cleans any of
+these it recognises from a previous run. The manual commands are only
+needed after a hard kill.
 
 ### WebTransport / QUIC Timeout
 If you see `net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT`:
@@ -440,6 +599,17 @@ If you are building a custom client, it must satisfy the following to communicat
 5. **Bootstrap before capture:** Resolve the relay and verify end-to-end transport *before* installing any routing or firewall rule. A partially-configured VPN is worse than a cleanly failed one.
 6. **Source-address transport exemption:** Exempt the transport from the tunnel by source address of the physical interface IP, not by UID. UID-wide exemptions — including root — are fail-open and must not be used.
 7. **Policy handling:** Treat SOCKS5 `REP = 0x02` (or the V2 equivalent) as a deterministic refusal. Do not retry with backoff — the server will refuse every attempt. Surface the error to the user, or in TUN mode let the destination TCP/UDP flow fail naturally so the application-level retry logic handles it.
+8. **Local CIDR bypass:** When tunnelling local‑only destinations
+   (`docker -p 127.0.0.1:port:port`, VM gateways, loopback‑adjacent
+   subnets), install a more‑specific route to the owning interface
+   before the split‑defaults. Client‑side only; do not relax server
+   policy to compensate.
+9. **Windows parity:** the kill switch must be scoped by process path
+   (`program="<exe>"`), not UID, and must be installed *after* the
+   Windows firewall stack is confirmed to accept netsh advfirewall
+   rules. Reserve `wintun.dll` resolution as a hard dependency at
+   startup — refusing to start on a missing DLL is friendlier than
+   silently failing during the first `tun::create_as_async`.
 
 ## License
 See repository's `LICENSE` file.

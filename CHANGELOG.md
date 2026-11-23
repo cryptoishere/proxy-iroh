@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-23
+
+- Restoring a peer endpoint after the loss of state resulting from a communication channel disruption.
+- Present two types of clients: a lightweight client and a VPN client.
+
 ## [0.7.0] - 2026-11-22
 
 Dual-signed attestation. Server and client now independently report per-session
@@ -194,7 +199,8 @@ This is the initial release of `proxy-iroh`, building upon the foundation of the
 - **Port allowlist and SSRF guard close two significant abuse vectors:** using the exit node as a jump host for mail relay, credential stuffing, RDP/VNC/SMB lateral movement, and database scanning; and reaching internal infrastructure or cloud metadata via SSRF. Default-deny on both.
 - **Out of scope (future work):** DNS exfiltration via the DoT resolver. Intended for `lib::dns`; noted in `README.md` under *Security Model → Out of scope*.
 
-[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/cryptoishere/proxy-iroh/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cryptoishere/proxy-iroh/compare/v0.6.0...v0.6.1
