@@ -131,6 +131,7 @@ This mode does not require root privileges. It simply exposes a local proxy port
 
 ```bash
 TUNNEL_ENCRYPTION_SECRET="your_secret_here" \
+TUNNEL_KDF_ENCRYPTION_SECRET="your_secret_here" \
 REGISTRATION_IDENT_ADDRESS="SMVV4fAq..." \
 TARGET_ENDPOINT_X1_SOCKS5_13="6d9640d..." \
 RELAY_URL_PUBLIC="https://relay.example.com" \
