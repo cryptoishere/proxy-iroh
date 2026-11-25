@@ -104,7 +104,8 @@ and same policies; only the underlying command surfaces differ:
 
 | Setting | Required | Meaning |
 |---|---|---|
-| `TUNNEL_ENCRYPTION_SECRET` | Yes | The Base64-encoded `ProxySecret` shared with the server. |
+| `TUNNEL_ENCRYPTION_SECRET` | Yes | The Base64-encoded `ProxySecret` received via hub. |
+| `TUNNEL_KDF_ENCRYPTION_SECRET` | Yes | The Base64-encoded `ProxySecret` received via hub. |
 | `REGISTRATION_IDENT_ADDRESS` | Yes | The registered proxy address (e.g., `SMVV4f...`). |
 | `TARGET_ENDPOINT_X1_SOCKS5_13` | Yes | The Iroh `EndpointId` of the remote server. |
 | `RELAY_URL_PUBLIC` | Yes | The Iroh relay URL used for NAT traversal (e.g., `https://relay.example.com`). |
