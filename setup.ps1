@@ -1,6 +1,6 @@
 
 # ==========================================
-# proxy-iroh v0.6.2 Windows Setup
+# proxy-iroh v0.7.1 Windows Setup
 # User: C:\Users\user
 # ==========================================
 
@@ -8,12 +8,12 @@ $ErrorActionPreference = "Stop"
 
 # Configuration
 $Dir = "C:\Users\user\Desktop\socks"
-$Version = "v0.6.2"
+$Version = "v0.7.1"
 
-$ZipName = "server-v0.6.2-x86_64-windows-msvc.zip"
+$ZipName = "server-v0.7.1-x86_64-windows-msvc.zip"
 $ZipUrl = "https://github.com/cryptoishere/proxy-iroh/releases/download/$Version/$ZipName"
 
-$ExpectedSHA256 = "7ad2b2ff324ee285ee68e957bcc8c6c823c677b5b8579d131402f273ce522019"
+$ExpectedSHA256 = "fb8d701159657f0d5257578ab7d4c077e1f7c19ee160f7bbd5cdd4475ee7ce8b"
 
 # Create directory
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
