@@ -108,7 +108,8 @@ and same policies; only the underlying command surfaces differ:
 | `TUNNEL_KDF_ENCRYPTION_SECRET` | Yes | The Base64-encoded `ProxySecret` received via hub. |
 | `REGISTRATION_IDENT_ADDRESS` | Yes | The registered proxy address (e.g., `SMVV4f...`). |
 | `TARGET_ENDPOINT_X1_SOCKS5_13` | Yes | The Iroh `EndpointId` of the remote server. |
-| `RELAY_URL_PUBLIC` | Yes | The Iroh relay URL used for NAT traversal (e.g., `https://relay.example.com`). |
+| `RELAY_URL_PUBLIC` | Yes | The Iroh relay URL used for NAT traversal (e.g., `https://smartholdem-block.duckdns.org:3341`). |
+| `HUB_ATTEST_URL` | Yes | Attestation report within the tunnel (defaults to `https://crypto-ig.com/api/v1/reports/bandwidth/attest`). |
 | `CLIENT_SOCKET_ADDRESS_BIND` | Yes (TUN) | Your physical IP address (e.g., `192.168.1.50`). **Do not use `0.0.0.0`** — the client refuses to start otherwise. |
 | `CLIENT_SOCKET_PORT_BIND` | Yes (TUN) | The physical UDP port to bind for Iroh (e.g., `60000`). |
 | `IROH_ADVERTISE_HOST` | No | Public IP/hostname to advertise to the relay. |
@@ -134,7 +135,6 @@ TUNNEL_ENCRYPTION_SECRET="your_secret_here" \
 TUNNEL_KDF_ENCRYPTION_SECRET="your_secret_here" \
 REGISTRATION_IDENT_ADDRESS="SMVV4fAq..." \
 TARGET_ENDPOINT_X1_SOCKS5_13="6d9640d..." \
-RELAY_URL_PUBLIC="https://relay.example.com" \
 ./lightweight-client
 ```
 
